@@ -39,6 +39,9 @@ cd mimo2api_mimoapi
 # 安装依赖
 npm install
 
+# 如果切换过 Node 版本，或启动时报 better-sqlite3 找不到 bindings
+npm rebuild better-sqlite3
+
 # 启动
 npm start        # 生产模式
 npm run dev      # 开发模式（热重载）
@@ -47,6 +50,8 @@ npm run dev      # 开发模式（热重载）
 服务默认运行在 `http://localhost:8080`。
 
 > 管理面板默认密码：`admin`，登录后可修改。首次使用需在管理面板创建 API 密钥供客户端调用。
+
+> 本项目使用 `better-sqlite3` 原生模块，请尽量保持安装依赖和启动服务使用同一个 Node 版本。切换 Node 版本后，如遇到 `Could not locate the bindings file`，重新执行 `npm rebuild better-sqlite3`。
 
 ### Docker 部署
 
