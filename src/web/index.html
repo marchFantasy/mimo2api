@@ -445,6 +445,14 @@ function setCache(key, data) {
   } catch (e) {}
 }
 
+function clearAdminCache() {
+  try {
+    Object.keys(localStorage).forEach(function(key) {
+      if (key.indexOf('mimo_cache_') === 0) localStorage.removeItem(key);
+    });
+  } catch (e) {}
+}
+
 function toast(msg,ok){ok=ok!==false;var el=document.createElement('div');el.className='toast-item';var icon=ok?'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>':'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/></svg>';el.innerHTML='<span style="color:'+(ok?'var(--c-accent-green)':'var(--c-accent-red)')+';flex-shrink:0">'+icon+'</span><span style="color:var(--c-text-2)">'+msg+'</span>';document.getElementById('toast').appendChild(el);setTimeout(function(){el.remove()},3000)};
 var monitorTimer=null;
 function showPage(name,el){document.querySelectorAll('.page').forEach(function(p){p.classList.remove('active')});document.querySelectorAll('.nav-item').forEach(function(n){n.classList.remove('active')});el.classList.add('active');document.getElementById('page-'+name).classList.add('active');clearInterval(monitorTimer);if(name==='monitor'){loadMonitor();monitorTimer=setInterval(loadMonitor,3000)}else{({accounts:loadAccounts,apikeys:loadApiKeys,stats:loadStats,logs:function(){loadLogs(1)},sessions:loadSessions,settings:loadSettings})[name]&&({accounts:loadAccounts,apikeys:loadApiKeys,stats:loadStats,logs:function(){loadLogs(1)},sessions:loadSessions,settings:loadSettings})[name]()}}
@@ -775,7 +783,7 @@ async function editApiKey(id,name){var newName=await showModal({title:'修改密
 async function toggleApiKeyStatus(id,cur){await api('/admin/api-keys/'+id,{method:'PATCH',body:{is_active:cur?0:1}});loadApiKeys()}
 async function deleteApiKey(id){var ok=await showModal({title:'删除 API 密钥',message:'确认删除此 API 密钥？删除后使用该密钥的客户端将无法访问。',dangerous:true,confirmText:'删除'});if(!ok)return;await api('/admin/api-keys/'+id,{method:'DELETE'});toast('已删除');loadApiKeys()}
 
-ensureAuth().then(function(){loadAccounts()});
+ensureAuth().then(function(){clearAdminCache();loadAccounts()});
 
 function renderSettings(cfg){
   var portEl = document.getElementById('cfgPort');
