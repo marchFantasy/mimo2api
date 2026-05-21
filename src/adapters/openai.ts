@@ -250,6 +250,7 @@ export function registerOpenAI(app: Hono) {
           let isAborted = false;
           let chunkCount = 0;
           let loggedError = false;
+          let responseBodyStr: string | null = null;
 
           const req = c.req.raw as any;
           if (req.on) {
@@ -512,6 +513,16 @@ export function registerOpenAI(app: Hono) {
                 if (finishReason !== 'tool_calls' && contentBuf) {
                   await sendDelta({ content: sanitizeOutput(contentBuf) });
                 }
+                // Build response body for logging
+                const logRespObj: any = { finish_reason: finishReason };
+                if (finishReason === 'tool_calls' && toolCallBuf && hasToolCallMarker(toolCallBuf)) {
+                  const parsedCalls = parseToolCalls(toolCallBuf);
+                  if (parsedCalls.length > 0) logRespObj.tool_calls = parsedCalls.map(tc => ({ name: tc.name, arguments: tc.arguments }));
+                } else if (contentBuf) {
+                  logRespObj.content = sanitizeOutput(contentBuf);
+                }
+                if (lastUsage) logRespObj.usage = { prompt_tokens: lastUsage.promptTokens, completion_tokens: lastUsage.completionTokens };
+                responseBodyStr = JSON.stringify(logRespObj);
                 await s.write(`data: ${JSON.stringify({ id: responseId, object: 'chat.completion.chunk', created, model: mimoModel, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: usageChunk })}\n\n`);
                 await s.write('data: [DONE]\n\n');
                 console.log('[STREAM] ✓ Completed:', { chunks: chunkCount, finishReason, tokens: lastUsage?.totalTokens || 0, duration: Date.now() - startTime + 'ms' });
@@ -522,12 +533,12 @@ export function registerOpenAI(app: Hono) {
             if (!isAborted) {
               try { await s.write(`data: ${JSON.stringify({ error: { message: String(err), type: 'api_error' } })}\n\n`); await s.write('data: [DONE]\n\n'); } catch {}
             }
-            logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime });
+            logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime, request_body: requestBody, response_body: responseBodyStr });
             loggedError = true;
           } finally {
             decrementActive(account.id);
             if (!loggedError) {
-              logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
+              logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody, response_body: responseBodyStr });
               if (lastUsage) {
                 updateSessionTokens(session.id, lastUsage.promptTokens);
               }
@@ -545,7 +556,8 @@ export function registerOpenAI(app: Hono) {
       }
 
       fullText = processThinkContent(fullText, config.thinkMode);
-      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
+      const nonStreamRespBody = JSON.stringify({ content: sanitizeOutput(fullText), usage: lastUsage ? { prompt_tokens: lastUsage.promptTokens, completion_tokens: lastUsage.completionTokens } : undefined });
+      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody, response_body: nonStreamRespBody });
       // 更新会话 token 统计
       if (lastUsage) {
         updateSessionTokens(session.id, lastUsage.promptTokens);
@@ -575,7 +587,7 @@ export function registerOpenAI(app: Hono) {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       handleAccountError(account, msg);
-      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime });
+      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime, request_body: requestBody });
       return c.json({ error: { message: msg, type: 'api_error' } }, 502);
     } finally {
       if (!isStream) decrementActive(account.id);

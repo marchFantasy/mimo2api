@@ -71,6 +71,8 @@ function logRequest(data: {
   status: 'success' | 'error';
   error?: string;
   duration_ms: number;
+  request_body?: string | null;
+  response_body?: string | null;
 }) {
   logApiRequest({ ...data, endpoint: 'anthropic' });
 }
@@ -178,6 +180,7 @@ export function registerAnthropic(app: Hono) {
       decrementActive(account.id);
       return c.json({ type: 'error', error: { type: 'invalid_request_error', message: 'Invalid JSON body' } }, 400);
     }
+    const requestBody = JSON.stringify(body);
     console.log('[REQ] Body parsed:', { model: body.model || 'default', stream: body.stream ?? false, messages: body.messages?.length || 0, tools: body.tools?.length || 0, thinking: body.thinking?.type === 'enabled' });
     console.log('[ANT] tools:', JSON.stringify(body.tools?.map((t: Record<string,unknown>) => t.name ?? t.function) ?? null));
 
@@ -235,6 +238,8 @@ export function registerAnthropic(app: Hono) {
           let isAborted = false;
           let eventCount = 0;
           let loggedError = false;
+          let responseBodyStr: string | null = null;
+          let responseContentBuf = '';
 
           const req = c.req.raw as any;
           if (req.on) {
@@ -250,6 +255,13 @@ export function registerAnthropic(app: Hono) {
             try {
               await s.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
               eventCount++;
+              // Track text content for response logging
+              if (event === 'content_block_delta') {
+                const d = data as any;
+                if (d?.delta?.type === 'text_delta' && d?.delta?.text) {
+                  responseContentBuf += d.delta.text;
+                }
+              }
             } catch (err) {
               console.error('[STREAM] ❌ Write error:', err);
               isAborted = true;
@@ -418,6 +430,14 @@ export function registerAnthropic(app: Hono) {
                   }
                 }
                 clearInterval(pingTimer!);
+                // Build response body for logging
+                const logRespObj: any = { finish_reason: stopReason, content: responseContentBuf };
+                if (stopReason === 'tool_use' && toolCallBuf && hasToolCallMarker(toolCallBuf)) {
+                  const parsedCalls = parseToolCalls(toolCallBuf);
+                  if (parsedCalls.length > 0) logRespObj.tool_calls = parsedCalls.map(tc => ({ name: tc.name, arguments: tc.arguments }));
+                }
+                if (lastUsage) logRespObj.usage = { prompt_tokens: lastUsage.promptTokens, completion_tokens: lastUsage.completionTokens };
+                responseBodyStr = JSON.stringify(logRespObj);
                 await sendEvent('message_delta', { type: 'message_delta', delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: lastUsage?.completionTokens ?? 0 } });
                 await sendEvent('message_stop', { type: 'message_stop' });
                 console.log('[STREAM] ✓ Completed:', { events: eventCount, stopReason, tokens: lastUsage?.totalTokens || 0, duration: Date.now() - startTime + 'ms' });
@@ -428,13 +448,13 @@ export function registerAnthropic(app: Hono) {
             if (!isAborted) {
               try { await sendEvent('error', { type: 'error', error: { type: 'api_error', message: String(err) } }); } catch {}
             }
-            logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime });
+            logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime, request_body: requestBody, response_body: responseBodyStr });
             loggedError = true;
           } finally {
             if (pingTimer) clearInterval(pingTimer);
             decrementActive(account.id);
             if (!loggedError) {
-              logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
+              logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody, response_body: responseBodyStr });
               if (lastUsage) {
                 updateSessionTokens(session.id, lastUsage.promptTokens);
               }
@@ -470,7 +490,8 @@ export function registerAnthropic(app: Hono) {
           for (const block of toAnthropicToolUse(calls)) content.push(block);
         }
       }
-      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
+      const nonStreamRespBody = JSON.stringify({ content: sanitizeOutput(fullText), usage: lastUsage ? { prompt_tokens: lastUsage.promptTokens, completion_tokens: lastUsage.completionTokens } : undefined });
+      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody, response_body: nonStreamRespBody });
       // 更新会话 token 统计
       if (lastUsage) {
         updateSessionTokens(session.id, lastUsage.promptTokens);
@@ -483,7 +504,7 @@ export function registerAnthropic(app: Hono) {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       handleAccountError(account, msg);
-      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime });
+      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime, request_body: requestBody });
       return c.json({ type: 'error', error: { type: 'api_error', message: msg } }, 502);
     } finally {
       if (!isStream) decrementActive(account.id);
