@@ -48,6 +48,28 @@ npm run dev      # 开发模式（热重载）
 
 > 管理面板默认密码：`admin`，登录后可修改。首次使用需在管理面板创建 API 密钥供客户端调用。
 
+### 首次运行数据
+
+仓库不会包含运行时数据库。别人通过 `git clone` 获取项目后，首次启动会自动创建 `dbdata/mimo-proxy.db`，账号、API Key、配置和日志默认都是空的。
+
+注意：
+
+- `dbdata/` 是本地持久化目录，不要提交到 Git。
+- 如果页面出现旧账号，通常是复用了本机旧的 `dbdata/` 或浏览器 `localStorage` 缓存。
+- 想重置为空系统，停止服务后删除 `dbdata/`，再重新启动。
+
+macOS / Linux:
+
+```bash
+rm -rf dbdata
+```
+
+Windows PowerShell:
+
+```powershell
+Remove-Item -Recurse -Force dbdata
+```
+
 ### 平台差异与 native 依赖
 
 本项目使用 SQLite 持久化存储，依赖 `better-sqlite3` 原生模块。该模块会为当前操作系统、CPU 架构和 Node.js 版本生成本地二进制文件，因此 **Windows、macOS、Linux 的 `node_modules` 不能混用**。
@@ -115,6 +137,8 @@ docker compose down
 数据目录会挂载到宿主机：
 - `./data` - 应用数据目录
 - `./dbdata` - SQLite 数据库目录（含 `mimo-proxy.db`）
+
+如果需要重置 Docker 部署的数据，先停止容器，再删除宿主机的 `./dbdata` 目录后重新启动。
 
 #### 端口配置
 
