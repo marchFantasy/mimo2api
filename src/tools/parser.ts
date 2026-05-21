@@ -735,7 +735,7 @@ function parseDirectToolNameFormat(text: string): ParsedToolCall[] {
   let match: RegExpExecArray | null;
   let count = 0;
 
-  const excludedTags = ['div', 'span', 'p', 'a', 'img', 'br', 'hr', 'ul', 'ol', 'li', 'table', 'tr', 'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'code', 'pre', 'blockquote', 'strong', 'em', 'b', 'i', 'u', 'todo', 'todo_list', 'thinking', 'result', 'task_progress', 'path', 'name', 'content', 'question', 'options'];
+  const excludedTags = ['div', 'span', 'p', 'a', 'img', 'br', 'hr', 'ul', 'ol', 'li', 'table', 'tr', 'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'code', 'pre', 'blockquote', 'strong', 'em', 'b', 'i', 'u', 'todo', 'todo_list', 'think', 'thinking', 'result', 'task_progress', 'path', 'name', 'content', 'question', 'options'];
 
   while ((match = directToolRe.exec(cleanText)) !== null) {
     if (++count > CONFIG.MAX_TOOL_CALLS) {
@@ -969,7 +969,7 @@ export function hasToolCallMarker(text: string): boolean {
   if (match) {
     const tagName = match[1].toLowerCase();
     // 排除常见的 HTML/Markdown 标签
-    const excludedTags = ['div', 'span', 'p', 'a', 'img', 'br', 'hr', 'ul', 'ol', 'li', 'table', 'tr', 'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'code', 'pre', 'blockquote', 'strong', 'em', 'b', 'i', 'u', 'thinking', 'result', 'task_progress', 'path', 'name', 'content', 'question', 'options'];
+    const excludedTags = ['div', 'span', 'p', 'a', 'img', 'br', 'hr', 'ul', 'ol', 'li', 'table', 'tr', 'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'code', 'pre', 'blockquote', 'strong', 'em', 'b', 'i', 'u', 'think', 'thinking', 'result', 'task_progress', 'path', 'name', 'content', 'question', 'options'];
     if (!excludedTags.includes(tagName)) {
       return true;
     }

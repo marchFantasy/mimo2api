@@ -96,7 +96,7 @@ function sanitizeContent(content: string | null, role: string): string {
 export function sanitizeOutput(text: string): string {
   if (!text) return text;
 
-  let cleaned = text;
+  let cleaned = text.replace(/\u0000/g, '');
 
   // 移除完整的标签对（包括内容）
   for (const tag of SYSTEM_TAGS) {

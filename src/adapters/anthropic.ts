@@ -137,26 +137,45 @@ function processThinkContent(text: string): { thinkContent: string; mainContent:
   return { thinkContent: '', mainContent: text };
 }
 
+function previewApiKey(apiKey: string): string {
+  if (!apiKey) return 'missing';
+  if (apiKey.length <= 12) return `${apiKey.slice(0, 4)}...`;
+  return `${apiKey.slice(0, 8)}...${apiKey.slice(-4)}`;
+}
+
 export function registerAnthropic(app: Hono) {
   app.post('/v1/messages', async (c) => {
     console.log('\n[REQ] ========== New Anthropic Request ==========');
+    console.log('[REQ] Method/Path:', c.req.method, c.req.path);
 
     const apiKey = extractApiKey(c);
+    console.log('[AUTH] API key:', previewApiKey(apiKey));
 
     // 1. 认证检查
     const apiKeyRecord = authenticateRequest(apiKey);
     if (!apiKeyRecord) {
+      console.warn('[AUTH] Failed:', apiKey ? 'invalid API key' : 'missing API key');
       return c.json({ type: 'error', error: { type: 'authentication_error', message: apiKey ? 'Invalid API key' : 'Missing API key' } }, 401);
     }
+    console.log('[AUTH] OK:', { apiKeyId: apiKeyRecord.id, name: apiKeyRecord.name });
 
     // 2. 原子性选择账号并递增并发计数
     const acquired = acquireAccountForRequest(apiKeyRecord);
     if (!acquired) {
+      console.warn('[ACCOUNT] No active account available');
       return c.json({ type: 'error', error: { type: 'service_error', message: 'No active account available' } }, 503);
     }
     const { account } = acquired;
+    console.log('[ACCOUNT] Acquired:', { accountId: account.id, alias: account.alias, activeRequests: account.active_requests });
 
-    const body = await c.req.json();
+    let body: Record<string, any>;
+    try {
+      body = await c.req.json();
+    } catch (err) {
+      console.error('[REQ] Failed to parse JSON body:', err);
+      decrementActive(account.id);
+      return c.json({ type: 'error', error: { type: 'invalid_request_error', message: 'Invalid JSON body' } }, 400);
+    }
     console.log('[REQ] Body parsed:', { model: body.model || 'default', stream: body.stream ?? false, messages: body.messages?.length || 0, tools: body.tools?.length || 0, thinking: body.thinking?.type === 'enabled' });
     console.log('[ANT] tools:', JSON.stringify(body.tools?.map((t: Record<string,unknown>) => t.name ?? t.function) ?? null));
 
@@ -164,6 +183,7 @@ export function registerAnthropic(app: Hono) {
     const mimoModel = await getResolvedModel(body.model ?? '');
     const isStream: boolean = body.stream ?? false;
     const enableThinking: boolean = body.thinking?.type === 'enabled';
+    const responseThinkMode = enableThinking ? config.thinkMode : 'strip';
     const tools: ToolDefinition[] | undefined = body.tools?.length ? body.tools : undefined;
     let messages = buildMessages(body);
     if (tools) {
@@ -271,7 +291,7 @@ export function registerAnthropic(app: Hono) {
                   if (!thinkingStarted && text.includes('<think>')) {
                     thinkingStarted = true;
                     text = text.replace('<think>', '');
-                    if (config.thinkMode === 'separate') {
+                    if (responseThinkMode === 'separate') {
                       await sendEvent('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } });
                       firstBlockSent = true;
                     } else if (!firstBlockSent) {
@@ -284,25 +304,25 @@ export function registerAnthropic(app: Hono) {
                     pastThink = true;
                     const thinkPart = text.slice(0, closeIdx);
                     const afterThink = text.slice(closeIdx + 8).trimStart();
-                    if (config.thinkMode === 'separate') {
+                    if (responseThinkMode === 'separate') {
                       if (thinkPart) {
                         console.log('[DBG] Sending thinking_delta:', JSON.stringify(thinkPart.slice(0, 50)));
                         await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: thinkPart } });
                       }
                       await sendEvent('content_block_stop', { type: 'content_block_stop', index: 0 });
                       await sendEvent('content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } });
-                    } else if (config.thinkMode === 'passthrough') {
+                    } else if (responseThinkMode === 'passthrough') {
                       thinkBuf += thinkPart;
                       await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '<think>' + thinkBuf + '</think>' } });
                     }
                     if (afterThink) { text = afterThink; } else { continue; }
                   } else {
-                    if (config.thinkMode === 'separate') {
+                    if (responseThinkMode === 'separate') {
                       if (text) {
                         console.log('[DBG] Sending thinking_delta chunk:', JSON.stringify(text.slice(0, 50)));
                         await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: text } });
                       }
-                    } else if (config.thinkMode === 'passthrough') {
+                    } else if (responseThinkMode === 'passthrough') {
                       thinkBuf += text;
                     }
                     continue;
@@ -315,7 +335,7 @@ export function registerAnthropic(app: Hono) {
                   if (t2Idx !== -1) text = text.slice(0, t2Idx);
                   if (!text) continue;
                   
-                  const idx = config.thinkMode === 'separate' ? 1 : 0;
+                  const idx = responseThinkMode === 'separate' ? 1 : 0;
                   if (toolCallBuf !== null) {
                     toolCallBuf += text;
                   } else {
@@ -353,21 +373,21 @@ export function registerAnthropic(app: Hono) {
                 }
                 if (!pastThink && thinkingStarted) {
                   pastThink = true;
-                  if (config.thinkMode === 'separate') {
+                  if (responseThinkMode === 'separate') {
                     await sendEvent('content_block_stop', { type: 'content_block_stop', index: 0 });
                     await sendEvent('content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } });
-                  } else if (config.thinkMode === 'passthrough') {
+                  } else if (responseThinkMode === 'passthrough') {
                     await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '<think>' + thinkBuf + '</think>' } });
                   }
                 }
                 if (pendingText) {
-                  const idx2 = config.thinkMode === 'separate' ? 1 : 0;
+                  const idx2 = responseThinkMode === 'separate' ? 1 : 0;
                   if (toolCallBuf !== null) toolCallBuf += pendingText;
                   else if (hasToolCallMarker(pendingText)) toolCallBuf = pendingText;
                   else await sendEvent('content_block_delta', { type: 'content_block_delta', index: idx2, delta: { type: 'text_delta', text: sanitizeOutput(pendingText) } });
                   pendingText = '';
                 }
-                const lastIdx = config.thinkMode === 'separate' && pastThink ? 1 : 0;
+                const lastIdx = responseThinkMode === 'separate' && pastThink ? 1 : 0;
                 await sendEvent('content_block_stop', { type: 'content_block_stop', index: lastIdx });
                 let stopReason = 'end_turn';
                 if (toolCallBuf && hasToolCallMarker(toolCallBuf)) {
@@ -429,11 +449,11 @@ export function registerAnthropic(app: Hono) {
         else if (chunk.type === 'usage') lastUsage = chunk.usage!;
       }
       
-      if (config.thinkMode === 'strip') {
+      if (responseThinkMode === 'strip') {
         fullText = fullText.replace(/<think>[\s\S]*?<\/think>/g, '').trimStart();
       }
       const content: unknown[] = [];
-      if (config.thinkMode === 'separate') {
+      if (responseThinkMode === 'separate') {
         const { thinkContent, mainContent } = processThinkContent(fullText);
         if (thinkContent) content.push({ type: 'thinking', thinking: thinkContent });
         content.push({ type: 'text', text: sanitizeOutput(mainContent) });
