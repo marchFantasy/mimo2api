@@ -3,7 +3,7 @@ import { stream } from 'hono/streaming';
 import { randomUUID } from 'crypto';
 import { decrementActive } from '../accounts.js';
 import { callMimo, MimoUsage, fetchBotConfig } from '../mimo/client.js';
-import { serializeMessages, ChatMessage } from '../mimo/serialize.js';
+import { serializeMessages, ChatMessage, sanitizeOutput } from '../mimo/serialize.js';
 import { config } from '../config.js';
 import { buildToolSystemPrompt, ToolDefinition } from '../tools/prompt.js';
 import { parseToolCalls, hasToolCallMarker } from '../tools/parser.js';
@@ -116,7 +116,7 @@ function buildMessages(body: Record<string, unknown>): ChatMessage[] {
         } else if (b.type === 'tool_result') {
           const resultContent = typeof b.content === 'string' ? b.content
             : Array.isArray(b.content) ? (b.content as Array<{type:string;text?:string}>).filter(x=>x.type==='text').map(x=>x.text??'').join('') : JSON.stringify(b.content);
-          parts.push(`[Tool Result]\n${resultContent}`);
+          parts.push(`[工具结果]\n${resultContent}`);
         }
       }
       content = parts.join('\n');
@@ -364,7 +364,7 @@ export function registerAnthropic(app: Hono) {
                   const idx2 = config.thinkMode === 'separate' ? 1 : 0;
                   if (toolCallBuf !== null) toolCallBuf += pendingText;
                   else if (hasToolCallMarker(pendingText)) toolCallBuf = pendingText;
-                  else await sendEvent('content_block_delta', { type: 'content_block_delta', index: idx2, delta: { type: 'text_delta', text: pendingText } });
+                  else await sendEvent('content_block_delta', { type: 'content_block_delta', index: idx2, delta: { type: 'text_delta', text: sanitizeOutput(pendingText) } });
                   pendingText = '';
                 }
                 const lastIdx = config.thinkMode === 'separate' && pastThink ? 1 : 0;
@@ -436,9 +436,9 @@ export function registerAnthropic(app: Hono) {
       if (config.thinkMode === 'separate') {
         const { thinkContent, mainContent } = processThinkContent(fullText);
         if (thinkContent) content.push({ type: 'thinking', thinking: thinkContent });
-        content.push({ type: 'text', text: mainContent });
+        content.push({ type: 'text', text: sanitizeOutput(mainContent) });
       } else {
-        content.push({ type: 'text', text: fullText });
+        content.push({ type: 'text', text: sanitizeOutput(fullText) });
       }
       let stopReason = 'end_turn';
       if (hasToolCallMarker(fullText)) {

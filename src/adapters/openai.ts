@@ -3,7 +3,7 @@ import { stream } from 'hono/streaming';
 import { randomUUID } from 'crypto';
 import { decrementActive } from '../accounts.js';
 import { callMimo, MimoUsage, fetchBotConfig, getChatModels } from '../mimo/client.js';
-import { serializeMessages, ChatMessage } from '../mimo/serialize.js';
+import { serializeMessages, ChatMessage, sanitizeOutput } from '../mimo/serialize.js';
 import { config } from '../config.js';
 import { buildToolSystemPrompt, ToolDefinition } from '../tools/prompt.js';
 import { parseToolCalls, hasToolCallMarker } from '../tools/parser.js';
@@ -507,7 +507,7 @@ export function registerOpenAI(app: Hono) {
                 }
                 // 有 tool_calls 时不发送 contentBuf，避免客户端重复显示文本
                 if (finishReason !== 'tool_calls' && contentBuf) {
-                  await sendDelta({ content: contentBuf });
+                  await sendDelta({ content: sanitizeOutput(contentBuf) });
                 }
                 await s.write(`data: ${JSON.stringify({ id: responseId, object: 'chat.completion.chunk', created, model: mimoModel, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: usageChunk })}\n\n`);
                 await s.write('data: [DONE]\n\n');
@@ -566,7 +566,7 @@ export function registerOpenAI(app: Hono) {
       }
       return c.json({
         id: responseId, object: 'chat.completion', created, model: mimoModel,
-        choices: [{ index: 0, message: { role: 'assistant', content: fullText }, finish_reason: 'stop' }],
+        choices: [{ index: 0, message: { role: 'assistant', content: sanitizeOutput(fullText) }, finish_reason: 'stop' }],
         usage: usageObj,
       });
     } catch (err: unknown) {

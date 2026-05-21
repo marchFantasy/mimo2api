@@ -27,7 +27,7 @@
 **管理**
 - Web 管理面板（账号、API 密钥、请求日志、统计图表）
 - REST 管理 API
-- JSON 文件持久化存储
+- SQLite 持久化存储
 
 ## 快速开始
 
@@ -39,9 +39,6 @@ cd mimo2api_mimoapi
 # 安装依赖
 npm install
 
-# 如果切换过 Node 版本，或启动时报 better-sqlite3 找不到 bindings
-npm rebuild better-sqlite3
-
 # 启动
 npm start        # 生产模式
 npm run dev      # 开发模式（热重载）
@@ -51,7 +48,47 @@ npm run dev      # 开发模式（热重载）
 
 > 管理面板默认密码：`admin`，登录后可修改。首次使用需在管理面板创建 API 密钥供客户端调用。
 
-> 本项目使用 `better-sqlite3` 原生模块，请尽量保持安装依赖和启动服务使用同一个 Node 版本。切换 Node 版本后，如遇到 `Could not locate the bindings file`，重新执行 `npm rebuild better-sqlite3`。
+### 平台差异与 native 依赖
+
+本项目使用 SQLite 持久化存储，依赖 `better-sqlite3` 原生模块。该模块会为当前操作系统、CPU 架构和 Node.js 版本生成本地二进制文件，因此 **Windows、macOS、Linux 的 `node_modules` 不能混用**。
+
+如果在不同系统之间复制项目目录、从 Windows 同步到 macOS、从 macOS 同步到 Windows、切换 Node.js 版本，或在 macOS 上切换 arm64 / Rosetta x64 运行环境，启动时可能出现类似错误：
+
+```text
+Error: dlopen(.../better_sqlite3.node): slice is not valid mach-o file
+Error: ... is not a valid Win32 application
+Error: Could not locate the bindings file
+```
+
+处理方式：
+
+```bash
+# 在当前系统和当前 Node.js 版本下重新编译 better-sqlite3
+npm rebuild better-sqlite3
+```
+
+如果仍然报错，删除当前平台不匹配的依赖后重新安装：
+
+macOS / Linux:
+
+```bash
+rm -rf node_modules
+npm install
+```
+
+Windows PowerShell:
+
+```powershell
+Remove-Item -Recurse -Force node_modules
+npm install
+```
+
+建议：
+
+- 不要提交或跨平台复制 `node_modules`。
+- 每个系统单独执行 `npm install`。
+- 切换 Node.js 版本后执行 `npm rebuild better-sqlite3`。
+- Docker 部署会在镜像内按 Linux 环境安装和编译依赖，不要把宿主机的 `node_modules` 挂载进容器。
 
 ### Docker 部署
 
@@ -77,7 +114,7 @@ docker compose down
 
 数据目录会挂载到宿主机：
 - `./data` - 应用数据目录
-- `./logs` - 日志目录
+- `./dbdata` - SQLite 数据库目录（含 `mimo-proxy.db`）
 
 #### 端口配置
 
@@ -108,7 +145,7 @@ docker run -d \
   --name mimo-proxy \
   -p 8080:8080 \
   -v $(pwd)/data:/app/data \
-  -v $(pwd)/logs:/app/logs \
+  -v $(pwd)/dbdata:/app/dbdata \
   mimo-proxy
 ```
 
@@ -194,7 +231,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ## 应用配置
 
-配置通过 **Admin Web UI**（`http://localhost:8080/`）或 **Admin API** 管理，持久化存储在 JSON 文件中。
+配置通过 **Admin Web UI**（`http://localhost:8080/`）或 **Admin API** 管理，持久化存储在 SQLite 数据库中，`.env` 文件不会被读取。
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
@@ -246,8 +283,8 @@ src/
 │   ├── style.css
 │   ├── input.css
 │   └── chart.js
-├── config.ts          # 配置加载（JSON → 内存）
-├── db.ts              # JSON 文件存储工具
+├── config.ts          # 配置加载（数据库 → 内存）
+├── db.ts              # SQLite 初始化
 ├── accounts.ts        # 多账号管理 & 负载均衡
 ├── api-keys.ts        # API 密钥管理
 └── index.ts           # 入口
