@@ -4,9 +4,9 @@ import { randomUUID } from 'crypto';
 import { decrementActive } from '../accounts.js';
 import { callMimo, MimoUsage, fetchBotConfig } from '../mimo/client.js';
 import { serializeMessages, ChatMessage } from '../mimo/serialize.js';
-import { config } from '../config.js';
+import { config, debugLog } from '../config.js';
 import { buildToolSystemPrompt, ToolDefinition } from '../tools/prompt.js';
-import { parseToolCalls, hasToolCallMarker } from '../tools/parser.js';
+import { parseToolCalls, hasToolCallMarker, findEarliestToolCallMarker } from '../tools/parser.js';
 import { toAnthropicToolUse } from '../tools/format.js';
 import { uploadImageToMimo, fetchImageBytes, MimoMedia } from '../mimo/upload.js';
 import { Account } from '../accounts.js';
@@ -264,7 +264,7 @@ export function registerAnthropic(app: Hono) {
             let pendingText = '';
             pingTimer = setInterval(async () => {
               if (!isAborted) {
-                try { await s.write(': ping\n\n'); }
+                try { await s.write('event: ping\ndata: {}\n\n'); }
                 catch (err) { console.error('[STREAM] Ping error:', err); isAborted = true; if (pingTimer) clearInterval(pingTimer); }
               }
             }, 5000);
@@ -274,7 +274,7 @@ export function registerAnthropic(app: Hono) {
 
               if (chunk.type === 'text') {
                 let text = (chunk.content ?? '').replace(/\u0000/g, '');
-                if (text) console.log('[DBG] chunk:', JSON.stringify(text.slice(0, 80)), 'pastThink:', pastThink, 'tcBuf:', toolCallBuf !== null);
+                if (text) debugLog('[DBG] chunk:', JSON.stringify(text.slice(0, 80)), 'pastThink:', pastThink, 'tcBuf:', toolCallBuf !== null);
                 if (!pastThink && !thinkingStarted && text && !text.includes('<think>')) {
                   pastThink = true;
                   if (!firstBlockSent) {
@@ -301,7 +301,7 @@ export function registerAnthropic(app: Hono) {
                     const afterThink = text.slice(closeIdx + 8).trimStart();
                     if (config.thinkMode === 'separate') {
                       if (thinkPart) {
-                        console.log('[DBG] Sending thinking_delta:', JSON.stringify(thinkPart.slice(0, 50)));
+                        debugLog('[DBG] Sending thinking_delta:', JSON.stringify(thinkPart.slice(0, 50)));
                         await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: thinkPart } });
                       }
                       await sendEvent('content_block_stop', { type: 'content_block_stop', index: 0 });
@@ -314,7 +314,7 @@ export function registerAnthropic(app: Hono) {
                   } else {
                     if (config.thinkMode === 'separate') {
                       if (text) {
-                        console.log('[DBG] Sending thinking_delta chunk:', JSON.stringify(text.slice(0, 50)));
+                        debugLog('[DBG] Sending thinking_delta chunk:', JSON.stringify(text.slice(0, 50)));
                         await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: text } });
                       }
                     } else if (config.thinkMode === 'passthrough') {
@@ -335,16 +335,7 @@ export function registerAnthropic(app: Hono) {
                     toolCallBuf += text;
                   } else {
                     pendingText += text;
-                    const fc1 = pendingText.indexOf('<function_calls>');
-                    const fc2 = pendingText.indexOf('<tool_call>');
-                    const fc3 = pendingText.indexOf('<toolcall');
-                    // 检测 {"name": 格式的工具调用（MiMo 未包裹 <tool_call> 时）
-                    let fc4 = -1;
-                    const namedJsonMatch = pendingText.match(/\{\s*"name"\s*:\s*"[A-Z]/);
-                    if (namedJsonMatch && namedJsonMatch.index !== undefined) {
-                      fc4 = namedJsonMatch.index;
-                    }
-                    const fcIdx = [fc1, fc2, fc3, fc4].filter(i => i !== -1).sort((a, b) => a - b)[0] ?? -1;
+                    const fcIdx = findEarliestToolCallMarker(pendingText);
                     if (fcIdx !== -1) {
                       const before = pendingText.slice(0, fcIdx);
                       if (before) await sendEvent('content_block_delta', { type: 'content_block_delta', index: idx, delta: { type: 'text_delta', text: before } });
@@ -393,7 +384,11 @@ export function registerAnthropic(app: Hono) {
                     for (let i = 0; i < toolUseBlocks.length; i++) {
                       const blockIdx = lastIdx + 1 + i;
                       await sendEvent('content_block_start', { type: 'content_block_start', index: blockIdx, content_block: { type: 'tool_use', id: toolUseBlocks[i].id, name: toolUseBlocks[i].name, input: {} } });
-                      await sendEvent('content_block_delta', { type: 'content_block_delta', index: blockIdx, delta: { type: 'input_json_delta', partial_json: JSON.stringify(toolUseBlocks[i].input) } });
+                      const jsonStr = JSON.stringify(toolUseBlocks[i].input);
+                      const CHUNK_SIZE = 50;
+                      for (let offset = 0; offset < jsonStr.length; offset += CHUNK_SIZE) {
+                        await sendEvent('content_block_delta', { type: 'content_block_delta', index: blockIdx, delta: { type: 'input_json_delta', partial_json: jsonStr.slice(offset, offset + CHUNK_SIZE) } });
+                      }
                       await sendEvent('content_block_stop', { type: 'content_block_stop', index: blockIdx });
                     }
                   } else {
@@ -411,7 +406,7 @@ export function registerAnthropic(app: Hono) {
                   }
                 }
                 clearInterval(pingTimer!);
-                await sendEvent('message_delta', { type: 'message_delta', delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: lastUsage?.completionTokens ?? 0 } });
+                await sendEvent('message_delta', { type: 'message_delta', delta: { stop_reason: stopReason, stop_sequence: null }, usage: { input_tokens: lastUsage?.promptTokens ?? 0, output_tokens: lastUsage?.completionTokens ?? 0 } });
                 await sendEvent('message_stop', { type: 'message_stop' });
                 console.log('[STREAM] ✓ Completed:', { events: eventCount, stopReason, tokens: lastUsage?.totalTokens || 0, duration: Date.now() - startTime + 'ms' });
               }

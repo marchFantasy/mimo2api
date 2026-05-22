@@ -4,9 +4,9 @@ import { randomUUID } from 'crypto';
 import { decrementActive } from '../accounts.js';
 import { callMimo, MimoUsage, fetchBotConfig, getChatModels } from '../mimo/client.js';
 import { serializeMessages, ChatMessage } from '../mimo/serialize.js';
-import { config } from '../config.js';
+import { config, debugLog } from '../config.js';
 import { buildToolSystemPrompt, ToolDefinition } from '../tools/prompt.js';
-import { parseToolCalls, hasToolCallMarker } from '../tools/parser.js';
+import { parseToolCalls, hasToolCallMarker, findEarliestToolCallMarker } from '../tools/parser.js';
 import { toOpenAIToolCalls } from '../tools/format.js';
 import { uploadImageToMimo, fetchImageBytes, MimoMedia } from '../mimo/upload.js';
 import { Account } from '../accounts.js';
@@ -272,7 +272,6 @@ export function registerOpenAI(app: Hono) {
             let thinkBuf = '';
             let toolCallBuf: string | null = null;
             let pendingText = '';
-            let contentBuf = ''; // 缓存所有 content，finish 时决定是否发送
 
             for await (const chunk of gen) {
               if (isAborted) { console.log('[STREAM] Aborted, stopping generation'); break; }
@@ -282,7 +281,7 @@ export function registerOpenAI(app: Hono) {
 
                 // 调试：打印包含 toolcall 的文本
                 if (text.toLowerCase().includes('toolcall') || text.includes('<tool')) {
-                  console.log('[STREAM:DEBUG] Text chunk contains tool call marker:', text.slice(0, 200));
+                  debugLog('[STREAM:DEBUG] Text chunk contains tool call marker:', text.slice(0, 200));
                 }
 
                 if (!pastThink && !thinkingStarted && text && !text.includes('<think>')) pastThink = true;
@@ -319,105 +318,36 @@ export function registerOpenAI(app: Hono) {
 
                     // 调试：记录 pendingText 的内容
                     if (pendingText.includes('{') || pendingText.includes('action')) {
-                      console.log('[STREAM:DEBUG] pendingText contains { or action:', {
+                      debugLog('[STREAM:DEBUG] pendingText contains { or action:', {
                         length: pendingText.length,
                         preview: pendingText.slice(Math.max(0, pendingText.length - 100))
                       });
                     }
 
-                    // 检测各种工具调用格式的起始位置
-                    const fc1 = pendingText.indexOf('<function_calls>');
-                    const fc2 = pendingText.indexOf('<tool_call>');
-                    const fc3 = pendingText.indexOf('<toolcall');
-
-                    // 检测直接工具名标签格式 - 使用通用模式，和解析器保持一致
-                    const directToolPattern = /<([a-z_][a-z0-9_]*)\s*>/i;
-                    const directToolMatch = pendingText.match(directToolPattern);
-                    let fc4 = -1;
-                    if (directToolMatch) {
-                      const tagName = directToolMatch[1].toLowerCase();
-                      // 排除常见的 HTML/Markdown 标签和 MiMo 内部标签
-                      const excludedTags = ['div', 'span', 'p', 'a', 'img', 'br', 'hr', 'ul', 'ol', 'li', 'table', 'tr', 'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'code', 'pre', 'blockquote', 'strong', 'em', 'b', 'i', 'u', 'thinking', 'result', 'task_progress', 'path', 'name', 'content', 'question', 'options'];
-                      if (!excludedTags.includes(tagName)) {
-                        fc4 = pendingText.indexOf(directToolMatch[0]);
-                      }
-                    }
-
-                    // 检测 JSON 格式的工具调用 - 使用更宽松的检测
-                    // 支持 { 和 "action" 之间有换行和空格的情况
-                    let fc5 = -1;
-                    if (pendingText.includes('{"action"')) {
-                      fc5 = pendingText.indexOf('{"action"');
-                    } else if (pendingText.includes('{ "action"')) {
-                      fc5 = pendingText.indexOf('{ "action"');
-                    } else if (pendingText.includes('{') && pendingText.includes('"action"')) {
-                      // 检查 { 和 "action" 之间是否只有空白字符
-                      const openBrace = pendingText.indexOf('{');
-                      const actionPos = pendingText.indexOf('"action"');
-                      if (actionPos > openBrace) {
-                        const between = pendingText.slice(openBrace + 1, actionPos);
-                        // 如果之间只有空白字符（空格、换行、制表符），认为是 JSON 工具调用
-                        if (/^\s*$/.test(between)) {
-                          fc5 = openBrace;
-                        }
-                      }
-                    }
-
-                    // 检测 bash 命令代码块
-                    let fc6 = -1;
-                    const bashBlockIdx = pendingText.indexOf('```bash');
-                    const shBlockIdx = pendingText.indexOf('```sh');
-                    const shellBlockIdx = pendingText.indexOf('```shell');
-                    if (bashBlockIdx !== -1) fc6 = bashBlockIdx;
-                    else if (shBlockIdx !== -1) fc6 = shBlockIdx;
-                    else if (shellBlockIdx !== -1) fc6 = shellBlockIdx;
-
-                    // 检测 {"name": 格式的工具调用（MiMo 未包裹 <tool_call> 时）
-                    let fc7 = -1;
-                    const namedJsonMatch = pendingText.match(/\{\s*"name"\s*:\s*"[A-Z]/);
-                    if (namedJsonMatch && namedJsonMatch.index !== undefined) {
-                      fc7 = namedJsonMatch.index;
-                    }
-
-                    if (fc5 !== -1) {
-                      console.log('[STREAM:DEBUG] Detected JSON tool call at position:', fc5, 'pendingText length:', pendingText.length);
-                    }
-                    if (fc6 !== -1) {
-                      console.log('[STREAM:DEBUG] Detected bash code block at position:', fc6, 'pendingText length:', pendingText.length);
-                    }
-
-                    const fcIdx = [fc1, fc2, fc3, fc4, fc5, fc6, fc7].filter(i => i !== -1).sort((a, b) => a - b)[0] ?? -1;
+                    // 检测工具调用标记（使用共享的检测函数）
+                    const fcIdx = findEarliestToolCallMarker(pendingText);
                     if (fcIdx !== -1) {
                       let before = pendingText.slice(0, fcIdx);
                       let toolCallStart = pendingText.slice(fcIdx);
 
-                      console.log('[STREAM:DEBUG] Tool call detected, before length:', before.length, 'preview:', before.slice(-50));
+                      debugLog('[STREAM:DEBUG] Tool call detected, before length:', before.length, 'preview:', before.slice(-50));
 
-                      // 如果是 JSON 格式（fc5），检查前面是否有 ```json 标记
-                      if (fcIdx === fc5 && before.endsWith('```json\n')) {
-                        // 将 ```json\n 也包含到 toolCallBuf 中，这样可以在解析时识别并去除
-                        const markdownStart = before.lastIndexOf('```json\n');
+                      // 检查前面是否有 ```json 标记（MiMo 有时将 JSON 工具调用包裹在 markdown 代码块中）
+                      const jsonMarkerMatch = before.match(/(```json)\s*$/);
+                      if (jsonMarkerMatch) {
+                        const markdownStart = before.lastIndexOf(jsonMarkerMatch[1]);
                         before = pendingText.slice(0, markdownStart);
                         toolCallStart = pendingText.slice(markdownStart);
-                        console.log('[STREAM:DEBUG] Adjusted for ```json marker, new before length:', before.length);
-                      } else if (fcIdx === fc5 && before.match(/```json\s*$/)) {
-                        // 处理 ```json 后面可能有空格的情况
-                        const match = before.match(/(```json\s*)$/);
-                        if (match) {
-                          const markdownStart = before.length - match[1].length;
-                          before = pendingText.slice(0, markdownStart);
-                          toolCallStart = pendingText.slice(markdownStart);
-                          console.log('[STREAM:DEBUG] Adjusted for ```json marker (with spaces), new before length:', before.length);
-                        }
+                        debugLog('[STREAM:DEBUG] Adjusted for ```json marker, new before length:', before.length);
                       }
 
                       if (before) {
-                        console.log('[STREAM:DEBUG] Buffering before text:', before);
-                        contentBuf += before;
+                        debugLog('[STREAM:DEBUG] Buffering before text:', before);
+                        await sendDelta({ content: before });
                       }
                       toolCallBuf = toolCallStart;
                       pendingText = '';
-                      console.log('[STREAM:DEBUG] Started toolCallBuf, length:', toolCallBuf.length, 'preview:', toolCallBuf.slice(0, 100));
+                      debugLog('[STREAM:DEBUG] Started toolCallBuf, length:', toolCallBuf.length, 'preview:', toolCallBuf.slice(0, 100));
                     } else {
                       // 增加 safe buffer 大小，避免 ```json 被分割
                       // 如果 pendingText 包含 ``` 但还没有完整的工具调用标记，保留更多字符
@@ -431,7 +361,7 @@ export function registerOpenAI(app: Hono) {
                       }
 
                       const safe = pendingText.slice(0, Math.max(0, pendingText.length - safeBufferSize));
-                      if (safe) contentBuf += safe;
+                      if (safe) await sendDelta({ content: safe });
                       pendingText = pendingText.slice(safe.length);
                     }
                   }
@@ -441,20 +371,19 @@ export function registerOpenAI(app: Hono) {
               } else if (chunk.type === 'finish') {
                 if (!pastThink && thinkingStarted) {
                   pastThink = true;
-                  // 不在这里发送 thinking，先缓存到 contentBuf
-                  if (config.thinkMode === 'passthrough') contentBuf += '<think>' + thinkBuf + '</think>';
+                  if (config.thinkMode === 'passthrough') await sendDelta({ content: '<think>' + thinkBuf + '</think>' });
                 }
                 if (pendingText) {
                   if (toolCallBuf !== null) toolCallBuf += pendingText;
                   else if (hasToolCallMarker(pendingText)) toolCallBuf = pendingText;
-                  else contentBuf += pendingText;
+                  else await sendDelta({ content: pendingText });
                   pendingText = '';
                 }
 
-                console.log('[STREAM:DEBUG] Finish event, toolCallBuf:', toolCallBuf ? toolCallBuf.slice(0, 500) : 'null');
+                debugLog('[STREAM:DEBUG] Finish event, toolCallBuf:', toolCallBuf ? toolCallBuf.slice(0, 500) : 'null');
                 if (toolCallBuf) {
-                  console.log('[STREAM:DEBUG] toolCallBuf full length:', toolCallBuf.length);
-                  console.log('[STREAM:DEBUG] hasToolCallMarker:', hasToolCallMarker(toolCallBuf));
+                  debugLog('[STREAM:DEBUG] toolCallBuf full length:', toolCallBuf.length);
+                  debugLog('[STREAM:DEBUG] hasToolCallMarker:', hasToolCallMarker(toolCallBuf));
                 }
 
                 const usageChunk = lastUsage ? {
@@ -491,20 +420,20 @@ export function registerOpenAI(app: Hono) {
                         }
                       }
                     } else {
-                      contentBuf += toolCallBuf;
+                      await sendDelta({ content: toolCallBuf });
                     }
                   } else {
                     // 客户端没有请求原生工具调用（如 Cline XML 模式），
                     // 将工具调用 XML 作为普通文本返回
                     console.log('[STREAM] Client did not send tools, returning tool call XML as text');
-                    contentBuf += toolCallBuf;
+                    await sendDelta({ content: toolCallBuf });
                   }
                 } else if (toolCallBuf) {
                   // toolCallBuf 存在但没有工具调用标记，可能是 bash 命令
                   if (shouldConvertToToolCalls) {
                     const bashDetection = detectAndConvertBashCommands(toolCallBuf);
                     if (bashDetection.hasBashCommand && bashDetection.convertedText) {
-                      console.log('[STREAM:DEBUG] Detected bash command, converting to tool call');
+                      debugLog('[STREAM:DEBUG] Detected bash command, converting to tool call');
                       const calls = parseToolCalls(bashDetection.convertedText);
                       if (calls.length > 0) {
                         finishReason = 'tool_calls';
@@ -526,18 +455,14 @@ export function registerOpenAI(app: Hono) {
                           }
                         }
                       } else {
-                        contentBuf += toolCallBuf;
+                        await sendDelta({ content: toolCallBuf });
                       }
                     } else {
-                      contentBuf += toolCallBuf;
+                      await sendDelta({ content: toolCallBuf });
                     }
                   } else {
-                    contentBuf += toolCallBuf;
+                    await sendDelta({ content: toolCallBuf });
                   }
-                }
-                // 有 tool_calls 时不发送 contentBuf，避免客户端重复显示文本
-                if (finishReason !== 'tool_calls' && contentBuf) {
-                  await sendDelta({ content: contentBuf });
                 }
                 await s.write(`data: ${JSON.stringify({ id: responseId, object: 'chat.completion.chunk', created, model: mimoModel, system_fingerprint: `fp_mimo_${created}`, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: usageChunk })}\n\n`);
                 await s.write('data: [DONE]\n\n');

@@ -49,6 +49,11 @@ export function loadConfig() {
   });
 }
 
+export const DEBUG = !!(process.env.DEBUG ?? process.env.NODE_ENV !== 'production');
+export function debugLog(...args: unknown[]) {
+  if (DEBUG) console.log(...args);
+}
+
 export function saveSetting(key: string, value: string) {
   const data = loadJsonConfig();
   (data as Record<string, unknown>)[key] = value;
