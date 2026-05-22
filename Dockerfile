@@ -20,6 +20,11 @@ RUN npm run build
 RUN npm prune --omit=dev && \
     npm cache clean --force
 
+# 清理生产依赖中运行时不需要的文件
+RUN rm -rf /app/node_modules/chart.js /app/node_modules/@kurkle/color && \
+    find /app/node_modules \( -name '*.map' -o -name '*.d.ts' -o -name 'README*' \
+      -o -name 'CHANGELOG*' -o -name 'LICENSE*' \) -delete
+
 # ===== 运行阶段 =====
 FROM node:24-alpine
 
