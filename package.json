@@ -18,13 +18,14 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@hono/node-server": "^1.19.11",
-    "chart.js": "^4.5.1",
+    "@hono/node-server": "^2.0.3",
     "hono": "^4.12.9"
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.2.2",
     "@types/node": "^25.5.0",
+    "@types/ws": "^8.18.1",
+    "chart.js": "^4.5.1",
     "tailwindcss": "^4.2.2",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
