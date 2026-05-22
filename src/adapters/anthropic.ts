@@ -97,8 +97,23 @@ async function extractImagesAnthropic(account: Account, body: Record<string, unk
 
 function buildMessages(body: Record<string, unknown>): ChatMessage[] {
   const msgs: ChatMessage[] = [];
-  if (body.system && typeof body.system === 'string') {
-    msgs.push({ role: 'system', content: body.system });
+  // 解析 system 字段（支持字符串和数组格式）
+  // 官方格式: "system": "text" 或 "system": [{type: "text", text: "..."}]
+  if (body.system != null) {
+    let systemContent: string;
+    if (typeof body.system === 'string') {
+      systemContent = body.system;
+    } else if (Array.isArray(body.system)) {
+      systemContent = (body.system as Array<{ type?: string; text?: string }>)
+        .filter(b => b && b.type === 'text')
+        .map(b => b.text ?? '')
+        .join('\n');
+    } else {
+      systemContent = '';
+    }
+    if (systemContent) {
+      msgs.push({ role: 'system', content: systemContent });
+    }
   }
   const bodyMsgs = (body.messages as Array<{ role: string; content: unknown }>) ?? [];
   for (const m of bodyMsgs) {
