@@ -33,6 +33,7 @@ export function acquireAccountForRequest(apiKeyRecord: ApiKey): { account: Accou
 
 export function logApiRequest(data: {
   account_id: string;
+  session_id?: string | null;
   api_key_id: string | null;
   endpoint: 'openai' | 'anthropic';
   model: string;
@@ -45,9 +46,9 @@ export function logApiRequest(data: {
 }) {
   db.prepare(
     `INSERT INTO request_logs (id, account_id, session_id, api_key_id, endpoint, model, prompt_tokens, completion_tokens, reasoning_tokens, duration_ms, status, error, request_body, response_body, created_at)
-     VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
-    randomUUID(), data.account_id, data.api_key_id, data.endpoint, data.model,
+    randomUUID(), data.account_id, data.session_id ?? null, data.api_key_id, data.endpoint, data.model,
     data.usage?.promptTokens ?? null, data.usage?.completionTokens ?? null,
     data.usage?.reasoningTokens ?? null, data.duration_ms,
     data.status, data.error ?? null, data.request_body ?? null, data.response_body ?? null,

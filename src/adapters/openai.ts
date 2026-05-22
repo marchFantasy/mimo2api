@@ -142,6 +142,7 @@ async function extractImages(account: Account, messages: Array<{ role: string; c
 
 function logRequest(data: {
   account_id: string;
+  session_id?: string | null;
   api_key_id: string | null;
   model: string;
   usage: MimoUsage | null;
@@ -533,12 +534,12 @@ export function registerOpenAI(app: Hono) {
             if (!isAborted) {
               try { await s.write(`data: ${JSON.stringify({ error: { message: String(err), type: 'api_error' } })}\n\n`); await s.write('data: [DONE]\n\n'); } catch {}
             }
-            logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime, request_body: requestBody, response_body: responseBodyStr });
+            logRequest({ account_id: account.id, session_id: session.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime, request_body: requestBody, response_body: responseBodyStr });
             loggedError = true;
           } finally {
             decrementActive(account.id);
             if (!loggedError) {
-              logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody, response_body: responseBodyStr });
+              logRequest({ account_id: account.id, session_id: session.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody, response_body: responseBodyStr });
               if (lastUsage) {
                 updateSessionTokens(session.id, lastUsage.promptTokens);
               }
@@ -557,7 +558,7 @@ export function registerOpenAI(app: Hono) {
 
       fullText = processThinkContent(fullText, config.thinkMode);
       const nonStreamRespBody = JSON.stringify({ content: sanitizeOutput(fullText), usage: lastUsage ? { prompt_tokens: lastUsage.promptTokens, completion_tokens: lastUsage.completionTokens } : undefined });
-      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody, response_body: nonStreamRespBody });
+      logRequest({ account_id: account.id, session_id: session.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody, response_body: nonStreamRespBody });
       // 更新会话 token 统计
       if (lastUsage) {
         updateSessionTokens(session.id, lastUsage.promptTokens);

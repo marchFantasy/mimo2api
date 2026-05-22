@@ -65,6 +65,7 @@ function resolveModel(model: string): string {
 
 function logRequest(data: {
   account_id: string;
+  session_id?: string | null;
   api_key_id: string | null;
   model: string;
   usage: MimoUsage | null;
@@ -448,13 +449,13 @@ export function registerAnthropic(app: Hono) {
             if (!isAborted) {
               try { await sendEvent('error', { type: 'error', error: { type: 'api_error', message: String(err) } }); } catch {}
             }
-            logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime, request_body: requestBody, response_body: responseBodyStr });
+            logRequest({ account_id: account.id, session_id: session.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime, request_body: requestBody, response_body: responseBodyStr });
             loggedError = true;
           } finally {
             if (pingTimer) clearInterval(pingTimer);
             decrementActive(account.id);
             if (!loggedError) {
-              logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody, response_body: responseBodyStr });
+              logRequest({ account_id: account.id, session_id: session.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody, response_body: responseBodyStr });
               if (lastUsage) {
                 updateSessionTokens(session.id, lastUsage.promptTokens);
               }
@@ -491,7 +492,7 @@ export function registerAnthropic(app: Hono) {
         }
       }
       const nonStreamRespBody = JSON.stringify({ content: sanitizeOutput(fullText), usage: lastUsage ? { prompt_tokens: lastUsage.promptTokens, completion_tokens: lastUsage.completionTokens } : undefined });
-      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody, response_body: nonStreamRespBody });
+      logRequest({ account_id: account.id, session_id: session.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody, response_body: nonStreamRespBody });
       // 更新会话 token 统计
       if (lastUsage) {
         updateSessionTokens(session.id, lastUsage.promptTokens);
