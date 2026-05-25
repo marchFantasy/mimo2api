@@ -277,7 +277,6 @@ export function registerOpenAI(app: Hono) {
             let thinkBuf = '';
             let toolCallBuf: string | null = null;
             let pendingText = '';
-            let contentBuf = ''; // 缓存所有 content，finish 时决定是否发送
 
             for await (const chunk of gen) {
               if (isAborted) { console.log('[STREAM] Aborted, stopping generation'); break; }
@@ -470,17 +469,11 @@ export function registerOpenAI(app: Hono) {
                     await sendDelta({ content: toolCallBuf });
                   }
                 }
-                // 有 tool_calls 时不发送 contentBuf，避免客户端重复显示文本
-                if (finishReason !== 'tool_calls' && contentBuf) {
-                  await sendDelta({ content: sanitizeOutput(contentBuf) });
-                }
                 // Build response body for logging
                 const logRespObj: any = { finish_reason: finishReason };
                 if (finishReason === 'tool_calls' && toolCallBuf && hasToolCallMarker(toolCallBuf)) {
                   const parsedCalls = parseToolCalls(toolCallBuf);
                   if (parsedCalls.length > 0) logRespObj.tool_calls = parsedCalls.map(tc => ({ name: tc.name, arguments: tc.arguments }));
-                } else if (contentBuf) {
-                  logRespObj.content = sanitizeOutput(contentBuf);
                 }
                 if (lastUsage) logRespObj.usage = { prompt_tokens: lastUsage.promptTokens, completion_tokens: lastUsage.completionTokens };
                 responseBodyStr = JSON.stringify(logRespObj);
