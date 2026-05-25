@@ -375,6 +375,17 @@ function extractName(inner: string): string | null {
     }
   }
 
+  // 5. Roo Code 格式: <function tool_name>...</function>
+  // 其中 tool_name 是 function 标签的裸属性（无 = 号）
+  m = inner.match(/<function\s+([a-zA-Z_][\w-]*)\s*>/i);
+  if (m) {
+    const candidate = m[1].trim();
+    const reserved = ['parameter', 'arg', 'name', 'function', 'tool_call', 'tool_result', 'arguments', 'parameters', 'input', 'tool_name'];
+    if (!reserved.includes(candidate.toLowerCase())) {
+      return candidate;
+    }
+  }
+
   return null;
 }
 
@@ -933,6 +944,61 @@ export function parseToolCalls(text: string): ParsedToolCall[] {
   }
 
   return validCalls;
+}
+
+// 检测并返回最早的工具调用标记位置（流式分割用）
+export function findEarliestToolCallMarker(text: string): number {
+  if (!text || typeof text !== 'string') return -1;
+  const cleanText = cleanInvisibleChars(text);
+  const checks: number[] = [];
+
+  // 1. <function_calls>
+  let idx = cleanText.indexOf('<function_calls>');
+  if (idx !== -1) checks.push(idx);
+
+  // 2. <tool_call> 或 <toolcall
+  idx = cleanText.indexOf('<tool_call>');
+  if (idx === -1) idx = cleanText.indexOf('<toolcall');
+  if (idx !== -1) checks.push(idx);
+
+  // 3. 直接工具名标签格式（如 <todo_write>, <run_command> 等）
+  const directToolPattern = /<([a-z_][a-z0-9_]*)\s*>/i;
+  const directMatch = cleanText.match(directToolPattern);
+  if (directMatch) {
+    const tagName = directMatch[1].toLowerCase();
+    const excludedTags = ['div', 'span', 'p', 'a', 'img', 'br', 'hr', 'ul', 'ol', 'li', 'table', 'tr', 'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'code', 'pre', 'blockquote', 'strong', 'em', 'b', 'i', 'u', 'thinking', 'result', 'task_progress', 'path', 'name', 'content', 'question', 'options'];
+    if (!excludedTags.includes(tagName)) {
+      checks.push(cleanText.indexOf(directMatch[0]));
+    }
+  }
+
+  // 4. JSON 格式 {"action": ...}
+  if (cleanText.includes('{"action"')) {
+    checks.push(cleanText.indexOf('{"action"'));
+  } else if (cleanText.includes('{ "action"')) {
+    checks.push(cleanText.indexOf('{ "action"'));
+  } else if (cleanText.includes('{') && cleanText.includes('"action"')) {
+    const openBrace = cleanText.indexOf('{');
+    const actionPos = cleanText.indexOf('"action"');
+    if (actionPos > openBrace) {
+      const between = cleanText.slice(openBrace + 1, actionPos);
+      if (/^\s*$/.test(between)) checks.push(openBrace);
+    }
+  }
+
+  // 5. {"name": 格式（MiMo 未包裹 <tool_call> 标签时的输出）
+  const namedJsonMatch = cleanText.match(/\{\s*"name"\s*:\s*"[A-Z]/);
+  if (namedJsonMatch && namedJsonMatch.index !== undefined) {
+    checks.push(namedJsonMatch.index);
+  }
+
+  // 6. bash 代码块标记
+  ['```bash', '```sh', '```shell'].forEach(prefix => {
+    idx = cleanText.indexOf(prefix);
+    if (idx !== -1) checks.push(idx);
+  });
+
+  return checks.length > 0 ? Math.min(...checks) : -1;
 }
 
 // 检测是否包含工具调用标记

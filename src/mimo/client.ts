@@ -172,15 +172,18 @@ export async function* callMimo(
 
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
-  let buf = '';
+  let bufParts: string[] = [];
   let event = '';
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const lines = buf.split('\n');
-    buf = lines.pop() ?? '';
+    bufParts.push(decoder.decode(value, { stream: true }));
+    const all = bufParts.join('');
+    bufParts.length = 0;
+    const lines = all.split('\n');
+    const last = lines.pop() ?? '';
+    if (last) bufParts.push(last);
 
     for (const line of lines) {
       const trimmed = line.trim();

@@ -41,3 +41,21 @@ export function loadConfig() {
 
   console.log('[CONFIG] Loaded from database:', Object.fromEntries(map));
 }
+
+export const DEBUG = !!(process.env.DEBUG ?? process.env.NODE_ENV !== 'production');
+export function debugLog(...args: unknown[]) {
+  if (DEBUG) console.log(...args);
+}
+
+export function saveSetting(key: string, value: string) {
+  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
+  // Also apply to in-memory config immediately
+  if (key in config) {
+    if (typeof (config as Record<string, unknown>)[key] === 'number') {
+      const v = Number(value);
+      if (!isNaN(v)) (config as Record<string, unknown>)[key] = v;
+    } else {
+      (config as Record<string, unknown>)[key] = value;
+    }
+  }
+}
