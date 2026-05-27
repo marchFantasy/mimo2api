@@ -172,6 +172,236 @@ export function registerOpenAI(app: Hono) {
     }
   });
 
+  // OpenAI Responses API (Codex compatibility)
+  app.post('/v1/responses', async (c) => {
+    console.log('\n[REQ] ========== New Responses API Request ==========');
+    console.log('[REQ] Time:', new Date().toISOString());
+
+    const startTime = Date.now();
+    const apiKey = extractApiKey(c);
+
+    const apiKeyRecord = authenticateRequest(apiKey);
+    if (!apiKeyRecord) {
+      return c.json({ error: { message: apiKey ? 'Invalid API key' : 'Missing API key', type: 'auth_error' } }, 401);
+    }
+
+    const acquired = acquireAccountForRequest(apiKeyRecord);
+    if (!acquired) {
+      return c.json({ error: { message: 'No active account available', type: 'service_error' } }, 503);
+    }
+    const { account } = acquired;
+
+    let requestBody: string | null = null;
+    let isStream = false;
+    let streamStarted = false;
+    let mimoModel = 'mimo-v2-pro';
+    let lastUsage: MimoUsage | null = null;
+
+    try {
+      let body: Record<string, any>;
+      try {
+        body = await c.req.json();
+      } catch (err) {
+        return c.json({ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } }, 400);
+      }
+
+      requestBody = JSON.stringify(body);
+      const normalized = normalizeOpenAIRequestBody(body);
+      isStream = body.stream ?? false;
+      const tools: ToolDefinition[] | undefined = body.tools?.length ? body.tools : undefined;
+      const enableThinking: boolean = !!body.reasoning_effort;
+      mimoModel = await getResolvedModel(body.model ?? '');
+
+      const { messages: cleanedMsgs, medias } = await extractImages(account, normalized.messages);
+      const rawMessages: ChatMessage[] = cleanedMsgs as ChatMessage[];
+
+      let messages = rawMessages;
+      if (tools) {
+        const toolPrompt = buildToolSystemPrompt(tools);
+        const sysIdx = messages.findIndex(m => m.role === 'system');
+        if (sysIdx >= 0) {
+          messages = messages.map((m, i) => i === sysIdx ? { ...m, content: m.content + '\n\n' + toolPrompt } : m);
+        } else {
+          messages = [{ role: 'system', content: toolPrompt }, ...messages];
+        }
+      }
+
+      const clientSessionId = generateClientSessionId(c, account.id, normalized.sessionKey, config.sessionIsolation);
+      const { conversationId, session } = await getOrCreateSession(account.id, clientSessionId, rawMessages);
+
+      const query = serializeMessages(messages);
+      const gen = callMimo(account, conversationId, query, enableThinking, mimoModel, medias);
+      const responseId = `resp_${randomUUID().replace(/-/g, '')}`;
+      const created = Math.floor(Date.now() / 1000);
+
+      if (isStream) {
+        c.header('Content-Type', 'text/event-stream');
+        c.header('Cache-Control', 'no-cache');
+        c.header('X-Accel-Buffering', 'no');
+        streamStarted = true;
+        return stream(c, async (s) => {
+          let isAborted = false;
+          let loggedError = false;
+
+          const req = c.req.raw as any;
+          if (req.on) {
+            req.on('close', () => { isAborted = true; });
+          }
+
+          const sendEvent = async (event: string, data: object) => {
+            if (isAborted) return;
+            try {
+              await s.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+            } catch (err) {
+              isAborted = true;
+              throw err;
+            }
+          };
+
+          const msgId = `msg_${randomUUID().replace(/-/g, '')}`;
+
+          const buildResponse = (outputText: string, status: string) => ({
+            id: responseId, object: 'response', created_at: created, model: mimoModel,
+            output: outputText ? [{ type: 'message', id: msgId, role: 'assistant', content: [{ type: 'output_text', text: outputText }], status: 'completed' }] : [],
+            usage: lastUsage ? { input_tokens: lastUsage.promptTokens, output_tokens: lastUsage.completionTokens, total_tokens: lastUsage.totalTokens } : undefined,
+            status,
+          });
+
+          try {
+            await sendEvent('response.created', buildResponse('', 'in_progress'));
+
+            await sendEvent('response.output_item.added', {
+              type: 'response.output_item.added',
+              output_index: 0,
+              item: { type: 'message', id: msgId, role: 'assistant', content: [], status: 'in_progress' },
+            });
+
+            await sendEvent('response.content_part.added', {
+              type: 'response.content_part.added',
+              output_index: 0,
+              content_index: 0,
+              part: { type: 'output_text', text: '' },
+            });
+
+            let pastThink = false;
+            let thinkingStarted = false;
+            let outputText = '';
+
+            for await (const chunk of gen) {
+              if (isAborted) break;
+
+              if (chunk.type === 'text') {
+                let text = (chunk.content ?? '').replace(/\u0000/g, '');
+
+                if (!pastThink && !thinkingStarted && text && !text.includes('<think>')) pastThink = true;
+                if (!pastThink) {
+                  if (!thinkingStarted && text.includes('<think>')) { thinkingStarted = true; text = text.replace('<think>', ''); }
+                  const closeIdx = text.indexOf('</think>');
+                  if (closeIdx !== -1) {
+                    pastThink = true;
+                    text = text.slice(closeIdx + 8).trimStart();
+                    if (!text) continue;
+                  } else {
+                    continue;
+                  }
+                }
+                if (pastThink) {
+                  text = text.replace(/<think>[\s\S]*?<\/think>/g, '');
+                  const t2Idx = text.indexOf('<think>');
+                  if (t2Idx !== -1) text = text.slice(0, t2Idx);
+                  text = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+                  const t3Idx = text.indexOf('<thinking>');
+                  if (t3Idx !== -1) text = text.slice(0, t3Idx);
+                  if (!text) continue;
+
+                  outputText += text;
+                  await sendEvent('response.output_text.delta', {
+                    type: 'response.output_text.delta',
+                    output_index: 0,
+                    content_index: 0,
+                    delta: text,
+                  });
+                }
+              } else if (chunk.type === 'usage') {
+                lastUsage = chunk.usage!;
+              } else if (chunk.type === 'finish') {
+                outputText = processThinkContent(outputText, config.thinkMode);
+
+                await sendEvent('response.output_text.done', {
+                  type: 'response.output_text.done',
+                  output_index: 0,
+                  content_index: 0,
+                  text: outputText,
+                });
+
+                await sendEvent('response.content_part.done', {
+                  type: 'response.content_part.done',
+                  output_index: 0,
+                  content_index: 0,
+                  part: { type: 'output_text', text: outputText },
+                });
+
+                await sendEvent('response.output_item.done', {
+                  type: 'response.output_item.done',
+                  output_index: 0,
+                  item: { type: 'message', id: msgId, role: 'assistant', content: [{ type: 'output_text', text: outputText }], status: 'completed' },
+                });
+
+                await sendEvent('response.completed', buildResponse(outputText, 'completed'));
+              }
+            }
+
+            logRequest({ account_id: account.id, session_id: session.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody });
+            if (lastUsage) updateSessionTokens(session.id, lastUsage.promptTokens);
+            loggedError = true;
+          } catch (err) {
+            console.error('[RESPONSES] Streaming error:', err);
+            if (!isAborted) {
+              try { await sendEvent('error', { type: 'error', message: String(err) }); } catch {}
+            }
+            logRequest({ account_id: account.id, session_id: session.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime, request_body: requestBody });
+            loggedError = true;
+          } finally {
+            decrementActive(account.id);
+            if (!loggedError) {
+              logRequest({ account_id: account.id, session_id: session.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody });
+              if (lastUsage) updateSessionTokens(session.id, lastUsage.promptTokens);
+            }
+          }
+        });
+      }
+
+      // Non-streaming
+      let fullText = '';
+      for await (const chunk of gen) {
+        if (chunk.type === 'text') fullText += chunk.content ?? '';
+        else if (chunk.type === 'usage') lastUsage = chunk.usage!;
+      }
+
+      fullText = processThinkContent(fullText, config.thinkMode);
+      logRequest({ account_id: account.id, session_id: session.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime, request_body: requestBody });
+      if (lastUsage) updateSessionTokens(session.id, lastUsage.promptTokens);
+
+      return c.json({
+        id: responseId, object: 'response', created_at: created, model: mimoModel,
+        output: [{ type: 'message', id: `msg_${randomUUID().replace(/-/g, '')}`, role: 'assistant', content: [{ type: 'output_text', text: sanitizeOutput(fullText) }], status: 'completed' }],
+        usage: lastUsage ? { input_tokens: lastUsage.promptTokens, output_tokens: lastUsage.completionTokens, total_tokens: lastUsage.totalTokens } : undefined,
+        status: 'completed',
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof OpenAIRequestError) {
+        logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime, request_body: requestBody });
+        return c.json({ error: { message: msg, type: 'invalid_request_error' } }, err.status as any);
+      }
+      handleAccountError(account, msg);
+      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime, request_body: requestBody });
+      return c.json({ error: { message: msg, type: 'api_error' } }, 502);
+    } finally {
+      if (!streamStarted) decrementActive(account.id);
+    }
+  });
+
   app.post('/v1/chat/completions', async (c) => {
     console.log('\n[REQ] ========== New OpenAI Request ==========');
     console.log('[REQ] Time:', new Date().toISOString());
