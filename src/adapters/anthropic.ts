@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 import { decrementActive } from '../accounts.js';
 import { callMimo, MimoUsage, fetchBotConfig } from '../mimo/client.js';
 import { serializeMessages, ChatMessage, sanitizeOutput } from '../mimo/serialize.js';
-import { config, debugLog } from '../config.js';
+import { config } from '../config.js';
 import { buildToolSystemPrompt, ToolDefinition } from '../tools/prompt.js';
 import { parseToolCalls, hasToolCallMarker, findEarliestToolCallMarker } from '../tools/parser.js';
 import { toAnthropicToolUse } from '../tools/format.js';
@@ -309,7 +309,6 @@ export function registerAnthropic(app: Hono) {
 
               if (chunk.type === 'text') {
                 let text = (chunk.content ?? '').replace(/\u0000/g, '');
-                if (text) debugLog('[DBG] chunk:', JSON.stringify(text.slice(0, 80)), 'pastThink:', pastThink, 'tcBuf:', toolCallBuf !== null);
                 if (!pastThink && !thinkingStarted && text && !text.includes('<think>')) {
                   pastThink = true;
                   if (!firstBlockSent) {
@@ -336,7 +335,6 @@ export function registerAnthropic(app: Hono) {
                     const afterThink = text.slice(closeIdx + 8).trimStart();
                     if (responseThinkMode === 'separate') {
                       if (thinkPart) {
-                        debugLog('[DBG] Sending thinking_delta:', JSON.stringify(thinkPart.slice(0, 50)));
                         await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: thinkPart } });
                       }
                       await sendEvent('content_block_stop', { type: 'content_block_stop', index: 0 });
@@ -349,7 +347,6 @@ export function registerAnthropic(app: Hono) {
                   } else {
                     if (responseThinkMode === 'separate') {
                       if (text) {
-                        debugLog('[DBG] Sending thinking_delta chunk:', JSON.stringify(text.slice(0, 50)));
                         await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: text } });
                       }
                     } else if (responseThinkMode === 'passthrough') {
