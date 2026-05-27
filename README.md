@@ -10,11 +10,12 @@
 
 **API 兼容**
 - OpenAI `v1/chat/completions`（流式 & 非流式）
+- OpenAI `v1/responses`（流式 & 非流式，Codex 兼容）
 - Anthropic `v1/messages`（流式 & 非流式）
 - 多模态图片理解（自动上传至小米 OSS）
 
 **客户端兼容**
-- Cline / Kilo Code / Roo Code / Cursor 等 AI 编程工具
+- Codex CLI / Cline / Kilo Code / Roo Code / Cursor 等 AI 编程工具
 - 任何支持 OpenAI 或 Anthropic API 的客户端
 
 **核心能力**
@@ -209,6 +210,19 @@ curl http://localhost:8080/v1/chat/completions \
   -d '{
     "model": "mimo-v2-pro",
     "messages": [{"role": "user", "content": "你好"}],
+    "stream": true
+  }'
+```
+
+### OpenAI Responses API（Codex 兼容）
+
+```bash
+curl http://localhost:8080/v1/responses \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mimo-v2-pro",
+    "input": [{"role": "user", "content": "你好"}],
     "stream": true
   }'
 ```
