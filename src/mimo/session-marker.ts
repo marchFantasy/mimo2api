@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { randomUUID } from 'crypto';
 import { Context } from 'hono';
 
 /**
@@ -60,12 +61,48 @@ export function calculateMessageFingerprint(messages: any[]): string {
 /**
  * 生成客户端会话标识（备用方案）
  */
-export function generateClientSessionId(c: Context, accountId: string): string {
-  // 优先使用客户端提供的会话ID
+export type SessionIsolationMode = 'manual' | 'auto' | 'per-request';
+
+function hashSessionHint(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 24);
+}
+
+/**
+ * 生成客户端会话标识（备用方案）
+ */
+export function generateClientSessionId(
+  c: Context,
+  accountId: string,
+  requestSessionKey?: string | null,
+  isolationMode: SessionIsolationMode = 'manual'
+): string {
+  // Responses API 的 conversation/previous_response_id 优先级最高。
+  if (requestSessionKey) {
+    console.log('[SESSION] Using explicit session ID from request body');
+    return `explicit_${accountId}_${requestSessionKey}`;
+  }
+
+  // 其次使用客户端提供的会话ID
   const explicitSessionId = c.req.header('x-session-id');
   if (explicitSessionId) {
     console.log('[SESSION] Using explicit session ID from header');
     return `explicit_${accountId}_${explicitSessionId}`;
+  }
+
+  if (isolationMode === 'per-request') {
+    console.log('[SESSION] Using per-request session');
+    return `request_${accountId}_${randomUUID()}`;
+  }
+
+  if (isolationMode === 'auto') {
+    const forwardedFor = c.req.header('x-forwarded-for')?.split(',')[0]?.trim();
+    const ip = forwardedFor
+      || c.req.header('x-real-ip')
+      || c.req.header('cf-connecting-ip')
+      || 'unknown-ip';
+    const userAgent = c.req.header('user-agent') || 'unknown-ua';
+    console.log('[SESSION] Using auto session isolation');
+    return `auto_${accountId}_${hashSessionHint(`${ip}|${userAgent}`)}`;
   }
 
   // 默认：基于账号的会话

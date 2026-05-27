@@ -43,6 +43,36 @@ export async function getOrCreateSession(
     fingerprint: currentFingerprint.slice(0, 16) + '...'
   });
 
+  // 显式会话（x-session-id / Responses conversation）应支持客户端只发送增量消息。
+  if (shouldReuseByClientSessionId(clientSessionId)) {
+    const pinnedSession = db.prepare(
+      'SELECT * FROM sessions WHERE account_id = ? AND client_session_id = ? AND is_expired = 0'
+    ).get(accountId, clientSessionId) as Session | undefined;
+
+    if (pinnedSession) {
+      if (isHistoryContaminated(messages)) {
+        console.log('[SESSION] ⚠️ History contamination detected in pinned session, creating new session...');
+      } else if (pinnedSession.cumulative_prompt_tokens > config.contextResetThreshold && config.contextResetThreshold > 0) {
+        console.log('[SESSION] Token limit exceeded for pinned session, creating new session...');
+      } else {
+        db.prepare(
+          `UPDATE sessions SET
+             last_message_fingerprint = ?,
+             last_used_at = datetime('now')
+           WHERE id = ?`
+        ).run(currentFingerprint, pinnedSession.id);
+
+        const updatedSession = db.prepare('SELECT * FROM sessions WHERE id = ?').get(pinnedSession.id) as Session;
+        console.log('[SESSION] ✓ Reusing pinned client session:', {
+          id: updatedSession.id.slice(0, 8) + '...',
+          conversationId: updatedSession.conversation_id.slice(0, 16) + '...',
+          clientSessionId: clientSessionId.slice(0, 20) + '...'
+        });
+        return { conversationId: updatedSession.conversation_id, session: updatedSession };
+      }
+    }
+  }
+
   // 查找所有活跃的会话，检查消息连续性
   const activeSessions = db.prepare(
     'SELECT * FROM sessions WHERE account_id = ? AND is_expired = 0 ORDER BY last_used_at DESC LIMIT 10'
@@ -98,6 +128,10 @@ export async function getOrCreateSession(
     console.error('[SESSION] ❌ Error creating new session:', error);
     throw error;
   }
+}
+
+function shouldReuseByClientSessionId(clientSessionId: string): boolean {
+  return clientSessionId.startsWith('explicit_') || clientSessionId.startsWith('auto_');
 }
 
 /**

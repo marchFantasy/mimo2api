@@ -13,6 +13,7 @@ import { Account } from '../accounts.js';
 import { getOrCreateSession, updateSessionTokens } from '../mimo/session.js';
 import { extractApiKey, authenticateRequest, acquireAccountForRequest, logApiRequest, handleAccountError } from '../middleware/request-handler.js';
 import { generateClientSessionId } from '../mimo/session-marker.js';
+import { normalizeOpenAIRequestBody, OpenAIRequestError } from './openai-normalize.js';
 
 // 静态 fallback（网络失败时使用）
 const MODEL_MAP: Record<string, string> = {
@@ -192,35 +193,54 @@ export function registerOpenAI(app: Hono) {
     }
     const { account } = acquired;
 
-    const body = await c.req.json();
-    const requestBody = JSON.stringify(body);
-    console.log('[REQ] Body parsed:', { model: body.model || 'default', stream: body.stream ?? false, messages: body.messages?.length || 0, tools: body.tools?.length || 0, reasoning: !!body.reasoning_effort });
-
-    const { messages: cleanedMsgs, medias } = await extractImages(account, body.messages ?? []);
-    const rawMessages: ChatMessage[] = cleanedMsgs as ChatMessage[];
-    const tools: ToolDefinition[] | undefined = body.tools?.length ? body.tools : undefined;
-    const isStream: boolean = body.stream ?? false;
-    const enableThinking: boolean = !!body.reasoning_effort;
-    const mimoModel = await getResolvedModel(body.model ?? '');
-
-    let messages = rawMessages;
-    if (tools) {
-      console.log('[REQ] 🔧 Tools:', tools.map(t => t.name || (t as any).function?.name).join(', '));
-      const toolPrompt = buildToolSystemPrompt(tools);
-      const sysIdx = messages.findIndex(m => m.role === 'system');
-      if (sysIdx >= 0) {
-        messages = messages.map((m, i) => i === sysIdx ? { ...m, content: m.content + '\n\n' + toolPrompt } : m);
-      } else {
-        messages = [{ role: 'system', content: toolPrompt }, ...messages];
-      }
-    }
-
-    console.log('[REQ] 🚀 Starting request processing...');
+    let requestBody: string | null = null;
+    let isStream = false;
+    let streamStarted = false;
+    let mimoModel = 'mimo-v2-pro';
     let lastUsage: MimoUsage | null = null;
 
     try {
+      let body: Record<string, any>;
+      try {
+        body = await c.req.json();
+      } catch (err) {
+        console.error('[REQ] Failed to parse JSON body:', err);
+        return c.json({ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } }, 400);
+      }
+
+      requestBody = JSON.stringify(body);
+      const normalized = normalizeOpenAIRequestBody(body);
+      console.log('[REQ] Body parsed:', {
+        model: body.model || 'default',
+        stream: body.stream ?? false,
+        messages: normalized.messages.length,
+        tools: body.tools?.length || 0,
+        reasoning: !!body.reasoning_effort,
+        sessionKey: normalized.sessionKey ?? null
+      });
+
+      const { messages: cleanedMsgs, medias } = await extractImages(account, normalized.messages);
+      const rawMessages: ChatMessage[] = cleanedMsgs as ChatMessage[];
+      const tools: ToolDefinition[] | undefined = body.tools?.length ? body.tools : undefined;
+      isStream = body.stream ?? false;
+      const enableThinking: boolean = !!body.reasoning_effort;
+      mimoModel = await getResolvedModel(body.model ?? '');
+
+      let messages = rawMessages;
+      if (tools) {
+        console.log('[REQ] 🔧 Tools:', tools.map(t => t.name || (t as any).function?.name).join(', '));
+        const toolPrompt = buildToolSystemPrompt(tools);
+        const sysIdx = messages.findIndex(m => m.role === 'system');
+        if (sysIdx >= 0) {
+          messages = messages.map((m, i) => i === sysIdx ? { ...m, content: m.content + '\n\n' + toolPrompt } : m);
+        } else {
+          messages = [{ role: 'system', content: toolPrompt }, ...messages];
+        }
+      }
+
+      console.log('[REQ] 🚀 Starting request processing...');
       // 1. 生成客户端会话标识（备用）
-      const clientSessionId = generateClientSessionId(c, account.id);
+      const clientSessionId = generateClientSessionId(c, account.id, normalized.sessionKey, config.sessionIsolation);
       
       // 2. 获取或创建会话（基于消息历史连续性）
       const { conversationId, session } = await getOrCreateSession(
@@ -247,6 +267,7 @@ export function registerOpenAI(app: Hono) {
         c.header('Content-Type', 'text/event-stream');
         c.header('Cache-Control', 'no-cache');
         c.header('X-Accel-Buffering', 'no');
+        streamStarted = true;
         return stream(c, async (s) => {
           let isAborted = false;
           let chunkCount = 0;
@@ -547,11 +568,15 @@ export function registerOpenAI(app: Hono) {
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof OpenAIRequestError) {
+        logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime, request_body: requestBody });
+        return c.json({ error: { message: msg, type: 'invalid_request_error' } }, err.status as any);
+      }
       handleAccountError(account, msg);
       logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime, request_body: requestBody });
       return c.json({ error: { message: msg, type: 'api_error' } }, 502);
     } finally {
-      if (!isStream) decrementActive(account.id);
+      if (!streamStarted) decrementActive(account.id);
     }
   });
 }

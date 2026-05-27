@@ -224,7 +224,7 @@ export function registerAnthropic(app: Hono) {
 
     try {
       // 1. 生成客户端会话标识（备用）
-      const clientSessionId = generateClientSessionId(c, account.id);
+      const clientSessionId = generateClientSessionId(c, account.id, null, config.sessionIsolation);
       
       // 2. 获取或创建会话（基于消息历史连续性）
       const { conversationId, session } = await getOrCreateSession(
